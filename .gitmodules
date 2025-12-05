@@ -1,0 +1,6 @@
+[submodule "canon/OpenROAD-flow-scripts"]
+	path = canon/OpenROAD-flow-scripts
+	url = git@github.com:The-OpenROAD-Project/OpenROAD-flow-scripts.git
+[submodule "canon/r22sdf"]
+	path = canon/r22sdf
+	url = git@github.com:nanamake/r22sdf.git
