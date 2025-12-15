@@ -6,6 +6,7 @@ import importlib
 import subprocess
 import functools
 import scripts
+import re
 r = functools.partial(subprocess.check_output, text=True)
 
 class RunMode(StrEnum):
@@ -29,6 +30,7 @@ def fmt_params(params):
         first = False
     return s
 
+yosys_log_eol = re.compile("End of script.*")
 def run(mode, design, synth_mode, yosys, params):
     design_name, design_class = design
     artifact_file = f"{design_name}_{fmt_params(params)}.il" if params else f"{design_name}.il"
@@ -47,8 +49,8 @@ def run(mode, design, synth_mode, yosys, params):
             script = read_rtlil_ys + "\n" + synth_ys
         case _:
             assert False, "out of sync RunMode with run"
-    print(script)
-    r([yosys, "--no-version", "-p", script])
+    log = r([yosys, "-p", script])
+    print(yosys_log_eol.search(log).group(0))
 
 def design_map():
     d = dict()
@@ -77,7 +79,12 @@ def main():
     mode = RunMode(args.mode)
     if (mode == RunMode.ARTIFACT):
         with open(Path("canon") / "ys-version", 'w') as myoutput:
-            subprocess.run([args.yosys, "--version"], stdout=myoutput)
+            arg = "--git-hash"
+            try:
+                r([args.yosys, "--git-hash"], stderr=subprocess.STDOUT)
+            except subprocess.CalledProcessError:
+                arg = "--version"
+            subprocess.run([args.yosys, arg], stdout=myoutput)
     design = (args.design, designs[args.design]())
     # TODO SynthMode from args
     run(mode, design, SynthMode.SYNTH, args.yosys, dict())
