@@ -87,7 +87,6 @@ def single_run(mode, args, design, params):
         exit(1)
 
     for yosys in args.yosys:
-        print(design)
         run(mode,
             (design, design_map()[design]()),
             SynthMode.from_str(args.flow),
