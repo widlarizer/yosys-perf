@@ -99,6 +99,7 @@ def main():
                         help="Alternate flow, valid only if mode is synth")
     parser.add_argument("--param",
                         nargs='*',
+                        default=[],
                         help="Design parameters")
 
     args = parser.parse_args()
