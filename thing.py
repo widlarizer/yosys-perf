@@ -9,6 +9,10 @@ import scripts
 import re
 r = functools.partial(subprocess.check_output, text=True)
 
+class OutputMode(StrEnum):
+    HUMAN = "human"
+    CSV = "csv"
+
 class RunMode(StrEnum):
     ARTIFACT = "artifact"
     VERILOG = "verilog"
@@ -28,6 +32,15 @@ class SynthMode(StrEnum):
     # Note: hard-coded
     # SYNTH_SKY130 = "synth; -lib canon/OpenROAD-flow-scripts/flow/platforms/sky130hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib"
 
+def common_parent(paths):
+    zipped = zip(*(p.parts for p in paths))
+    common_parts = []
+    for parts in zipped:
+        if len(set(parts)) > 1: break
+        common_parts.append(parts[0])
+    return Path(*common_parts)
+
+
 def fmt_params(params):
     s = ""
     first = True
@@ -38,10 +51,59 @@ def fmt_params(params):
         first = False
     return s
 
-yosys_log_eol = re.compile("End of script.*")
-def run(mode, design, synth_mode, yosys, params):
+
+class HumanOut():
+    def add(self, ys, design, result):
+        print(f"{ys}: {design}")
+        print(result)
+
+    def out(self):
+        pass
+
+class CsvOut():
+    _time = dict()
+    _memory = dict()
+
+    def add(self, ys, design, result):
+        match = re.search(r"user ([\d.]+)s system ([\d.]+)s, MEM: ([\d.]+) MB", result)
+        if not match:
+            print(f"Unexpected formatting of \"{result}\"")
+        user, system, mem = match.groups()
+        self._time[ys, design] = float(user) + float(system)
+        self._memory[ys, design] = float(mem)
+
+    def out(self):
+        yosyes = set()
+        designs = set()
+        for ys, design in self._time.keys():
+            yosyes.add(ys)
+            designs.add(design)
+
+        ys_root = common_parent(yosyes)
+        def print_one_dataset(dataset):
+            print("design", end=";")
+            for ys in sorted(yosyes):
+                print(ys.relative_to(ys_root), end=";")
+            print()
+
+            for design in sorted(designs):
+                print(design, end=";")
+                for ys in sorted(yosyes):
+                    print(dataset[ys, design], end=";")
+                print()
+
+        print("time")
+        print_one_dataset(self._time)
+        print()
+        print("memory")
+        print_one_dataset(self._memory)
+
+
+yosys_log_end = re.compile("End of script.*")
+def run(out, mode, design, synth_mode, yosys, params):
     design_name, design_class = design
-    artifact_file = f"{design_name}_{fmt_params(params)}.il" if params else f"{design_name}.il"
+    tag = f"{design_name}_{fmt_params(params)}" if params else f"{design_name}"
+    artifact_file = tag + ".il"
     artifact_path = Path("artifacts") / artifact_file
     write_rtlil_ys = f"write_rtlil {artifact_path}"
     read_rtlil_ys = f"read_rtlil {artifact_path}"
@@ -57,9 +119,10 @@ def run(mode, design, synth_mode, yosys, params):
             script = read_rtlil_ys + "\n" + synth_ys
         case _:
             assert False, "out of sync RunMode with run"
-    print(f"{yosys}: {artifact_file} {synth_mode.name}")
     log = r([yosys, "-p", script])
-    print(yosys_log_eol.search(log).group(0))
+    res = yosys_log_end.search(log).group(0)
+    out.add(yosys, f"{tag}-{synth_mode.name}", res)
+
 
 def design_map():
     d = dict()
@@ -69,6 +132,7 @@ def design_map():
             for c in module.__all__:
                 d[c.__name__.lower()] = c
     return d
+
 
 def params_from_str(pairs):
     ret = dict()
@@ -81,18 +145,21 @@ def params_from_str(pairs):
         ret[lhs] = rhs
     return ret
 
-def single_run(mode, args, design, params):
+
+def single_run(out_mode, mode, args, design, params):
     if mode != RunMode.SYNTH and args.flow != "":
         print("--flow specified outside of synth mode")
         exit(1)
 
     for yosys in args.yosys:
-        run(mode,
+        run(out_mode,
+            mode,
             (design, design_map()[design]()),
             SynthMode.from_str(args.flow),
             yosys,
             params_from_str(params)
         )
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -117,10 +184,21 @@ def main():
     parser.add_argument("--auto",
                         action="store_true",
                         help="Design parameters")
+    parser.add_argument("--output",
+                        choices=list(map(str, OutputMode)),
+                        default=OutputMode.HUMAN,
+                        help="Design parameters")
 
     args = parser.parse_args()
     mode = RunMode(args.mode)
-    if (mode == RunMode.ARTIFACT):
+    out_mode = OutputMode(args.output)
+
+    if out_mode == OutputMode.CSV:
+        out = CsvOut()
+    else:
+        out = HumanOut()
+
+    if mode == RunMode.ARTIFACT:
         with open(Path("canon") / "ys-version", 'w') as myoutput:
             arg = "--git-hash"
             try:
@@ -134,13 +212,14 @@ def main():
             ("jpeg", []),
             ("ibex", []),
             ("fft64", ["width=64"]),]:
-            single_run(mode, args, design, params)
+            single_run(out, mode, args, design, params)
     else:
         if not args.design:
             print("Missing --design without --auto")
             exit(1)
-        single_run(mode, args, args.design, args.param)
+        single_run(out, mode, args, args.design, args.param)
 
+    out.out()
 
 
 if __name__ == "__main__":
