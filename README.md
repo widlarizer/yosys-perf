@@ -2,10 +2,22 @@
 
 Runtime and memory usage test collection for [Yosys](https://github.com/YosysHQ/yosys). Very early stage repo. Might change a lot soon.
 
+## Quick start
+
+```bash
+# Run synthesis benchmarks on all designs
+python analyze.py
+
+# Compare two Yosys builds
+python analyze.py --yosys ./yosys-old ./yosys-new --csv
+```
+
 ## Directory structure
 
 + thing.py
   - the script you run to get things done
++ analyze.py
+  - profiling & design analysis
 + scripts
   - Yosys synthesis scripts
 + artifacts
