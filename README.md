@@ -16,10 +16,6 @@ python analyze.py --yosys ./yosys-old ./yosys-new --csv
 
 + thing.py
   - the script you run to get things done
-+ analyze.py
-  - profiling & design analysis
-+ ff.py
-  - flip flop analysys
 + scripts
   - Yosys synthesis scripts
 + artifacts

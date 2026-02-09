@@ -5,8 +5,11 @@ import pkgutil
 import importlib
 import subprocess
 import functools
+import tempfile
+import json
 import re
 import sys
+import os
 
 try:
 	import scripts
@@ -31,6 +34,7 @@ class SynthMode(StrEnum):
 	SYNTH = "synth"
 	SYNTH_FLATTEN = "synth -flatten"
 
+	@staticmethod
 	def from_str(s):
 		if s == "":
 			return SynthMode.SYNTH
@@ -71,15 +75,18 @@ def design_map():
 	for _, modname, ispkg in pkgutil.iter_modules(scripts.__path__):
 		if not ispkg:
 			module = importlib.import_module(f"scripts.{modname}")
-			for c in module.__all__:
-				d[c.__name__.lower()] = c
+			if hasattr(module, "__all__"):
+				for c in module.__all__:
+					d[c.__name__.lower()] = c
 	return d
 
 def discover_designs(artifacts_dir):
 	"""Discover designs from .il files in artifacts directory."""
 	designs = []
-	for f in sorted(Path(artifacts_dir).glob("*.il")):
-		designs.append(f.stem)
+	p = Path(artifacts_dir)
+	if p.exists():
+		for f in sorted(p.glob("*.il")):
+			designs.append(f.stem)
 	return designs
 
 def params_from_str(pairs):
@@ -96,9 +103,88 @@ def params_from_str(pairs):
 def tag_for(design, params):
 	return f"{design}_{fmt_params(params)}" if params else design
 
-
 def artifact_path_for(tag):
 	return Path("artifacts") / f"{tag}.il"
+
+# Sequential logic group
+SEQ_GROUPS = {"reg", "reg_ff", "reg_latch"}
+# Memory groups
+MEM_GROUPS = {"mem"}
+
+def load_cell_groups(json_path):
+	"""
+	Parse the JSON produced by `help -dump-cells-json`.
+	Returns a dict mapping cell type name -> category string.
+	"""
+	with open(json_path) as f:
+		data = json.load(f)
+
+	groups = data.get("groups", {})
+	cats = {}
+
+	for group_name, types in groups.items():
+		if group_name in SEQ_GROUPS:
+			cat = "seq"
+		elif group_name in MEM_GROUPS:
+			cat = "mem"
+		else:
+			cat = "comb"
+
+		for t in types:
+			cats[t] = cat
+
+	return cats
+
+def dump_cell_groups(yosys_bin):
+	"""
+	Run `help -dump-cells-json` via Yosys and return cell classification dict.
+	"""
+	with tempfile.NamedTemporaryFile(mode='w+', suffix=".json", delete=False) as tmp:
+		tmp_path = tmp.name
+
+	try:
+		cmd = [str(yosys_bin), "-p", f"help -dump-cells-json {tmp_path}"]
+		subprocess.run(
+			cmd,
+			capture_output=True,
+			text=True,
+			check=True
+		)
+		return load_cell_groups(tmp_path)
+	except subprocess.CalledProcessError as e:
+		print(f"Warning: Failed to run Yosys cell dump ({e}). "
+			  "Cell classification will be incomplete.", file=sys.stderr)
+		return {}
+	except (FileNotFoundError, json.JSONDecodeError) as e:
+		print(f"Warning: Could not parse Yosys cell dump ({e}).", file=sys.stderr)
+		return {}
+	finally:
+		if os.path.exists(tmp_path):
+			try:
+				os.unlink(tmp_path)
+			except OSError:
+				pass
+
+def classify_cells(cells_breakdown, cell_cats):
+	"""
+	Given a dict of {cell_type: count} from stat output and a
+	classification dict from dump_cell_groups, return category totals
+	and per-type breakdown.
+
+	Returns (totals, by_type) where:
+	  totals = {"seq": N, "mem": N, "comb": N, "other": N}
+	  by_type = {"seq": {type: count, ...}, ...}
+	"""
+	totals = {"seq": 0, "mem": 0, "comb": 0, "other": 0}
+	by_type = {"seq": {}, "mem": {}, "comb": {}, "other": {}}
+
+	for cell_type, count in cells_breakdown.items():
+		cat = cell_cats.get(cell_type, "other")
+
+		totals[cat] += count
+		by_type[cat][cell_type] = count
+
+	return totals, by_type
 
 def run_yosys(yosys_bin, script, detailed_timing=False):
 	"""Run Yosys with the given script, return combined stdout+stderr."""
@@ -113,6 +199,7 @@ def parse_stat(output):
 	"""Parse `stat` output for cell counts, memory, timing footer."""
 	stats = {}
 
+	# Find the statistics block
 	match = re.search(
 		r'\+----------Count including submodules\.\s*\|\s*(.*?)(?:End of script|$)',
 		output, re.DOTALL
@@ -127,24 +214,34 @@ def parse_stat(output):
 		summary = match.group(1)
 
 		for name, pattern in [
-			("wires", r'^\s*(\d+)\s+wires\s*$'),
-			("wire_bits", r'^\s*(\d+)\s+wire bits\s*$'),
-			("public_wires", r'^\s*(\d+)\s+public wires\s*$'),
-			("public_wire_bits", r'^\s*(\d+)\s+public wire bits\s*$'),
-			("ports", r'^\s*(\d+)\s+ports\s*$'),
-			("port_bits", r'^\s*(\d+)\s+port bits\s*$'),
-			("memories", r'^\s*(\d+)\s+memories\s*$'),
-			("memory_bits", r'^\s*(\d+)\s+memory bits\s*$'),
-			("processes", r'^\s*(\d+)\s+processes\s*$'),
-			("cells", r'^\s*(\d+)\s+cells\s*$'),
+			("wires", r'^\s*Number of wires:\s+(\d+)\s*$'),
+			("wire_bits", r'^\s*Number of wire bits:\s+(\d+)\s*$'),
+			("public_wires", r'^\s*Number of public wires:\s+(\d+)\s*$'),
+			("public_wire_bits", r'^\s*Number of public wire bits:\s+(\d+)\s*$'),
+			("ports", r'^\s*Number of ports:\s+(\d+)\s*$'),
+			("port_bits", r'^\s*Number of port bits:\s+(\d+)\s*$'),
+			("memories", r'^\s*Number of memories:\s+(\d+)\s*$'),
+			("memory_bits", r'^\s*Number of memory bits:\s+(\d+)\s*$'),
+			("processes", r'^\s*Number of processes:\s+(\d+)\s*$'),
+			("cells", r'^\s*Number of cells:\s+(\d+)\s*$'),
 		]:
 			m = re.search(pattern, summary, re.MULTILINE)
 			if m:
 				stats[name] = int(m.group(1))
+			else:
+				# Fallback for short format ("   12 wires")
+				short_pattern = pattern.replace(r"Number of ", r"").replace(r":\s+", r"\s+")
+				m = re.search(short_pattern, summary, re.MULTILINE)
+				if m:
+					stats[name] = int(m.group(1))
 
+		# Capture specific cell usage ("   $_DFF_P_      4")
 		cells = {}
-		for m in re.finditer(r'^\s+(\d+)\s+(\$_?\w+)\s*$', summary, re.MULTILINE):
-			cells[m.group(2)] = int(m.group(1))
+		for m in re.finditer(r'^\s+(\S+)\s+(\d+)\s*$', summary, re.MULTILINE):
+			name = m.group(1)
+			count = int(m.group(2))
+			cells[name] = count
+
 		stats["cells_breakdown"] = cells
 
 	# CPU/MEM
@@ -158,7 +255,7 @@ def parse_stat(output):
 		stats["time"] = stats["user_time"] + stats["sys_time"]
 		stats["mem_mb"] = float(m.group(3))
 
-	# "Time spent" summary line
+	# "Time spent"
 	m = re.search(r'Time spent:\s*(.+?)(?:\n|$)', output)
 	if m:
 		top_times = []
@@ -184,12 +281,7 @@ def parse_stat(output):
 
 def parse_detailed_timing(output):
 	"""
-	Parse Yosys -d output: per-pass timing summary printed at exit.
-
-	The -d flag uses getrusage() CPU time and prints lines like:
-	   42%     3 calls    1.234 sec opt_clean
-		0%     1 calls    0.014 sec hierarchy
-	Returns list of (pass_name, seconds, count) sorted by time descending.
+	Parse Yosys -d output.
 	"""
 	pass_times = []
 
@@ -205,7 +297,7 @@ def parse_detailed_timing(output):
 	return sorted(pass_times, key=lambda x: -x[1])
 
 def format_pass_timing(pass_times, top_n=10):
-	"""Format pass timing for display. top_n=None shows all."""
+	"""Format pass timing for display."""
 	if not pass_times:
 		return ""
 	total = sum(t for _, t, _ in pass_times)
@@ -232,26 +324,6 @@ def parse_abc_area(output):
 	for m in re.finditer(r'\band\s*=\s*(\d+)', output):
 		abc_area += int(m.group(1))
 	return abc_area
-
-def parse_select_count(output):
-	"""Parse 'N objects' lines from select -count output."""
-	return [int(m.group(1)) for m in re.finditer(r'(\d+) objects', output)]
-
-FF_SELECT_PATTERNS = [
-	# Word-level sequential cells
-	"t:$sr", "t:$ff", "t:$dff", "t:$dffe", "t:$dffsr", "t:$dffsre",
-	"t:$adff", "t:$adffe", "t:$aldff", "t:$aldffe",
-	"t:$sdff", "t:$sdffe", "t:$sdffce",
-	"t:$dlatch", "t:$adlatch", "t:$dlatchsr",
-	# Gate-level sequential cells (wildcard covers all polarity variants)
-	"t:$_DFF_*", "t:$_DFFE_*", "t:$_DFFSR_*", "t:$_DFFSRE_*",
-	"t:$_SDFF_*", "t:$_SDFFE_*", "t:$_SDFFCE_*",
-	"t:$_ALDFF_*", "t:$_ALDFFE_*",
-	"t:$_DLATCH_*", "t:$_DLATCHSR_*",
-	"t:$_SR_*", "t:$_FF_",
-]
-
-FF_SELECT_EXPR = " ".join(FF_SELECT_PATTERNS)
 
 class HumanOut:
 	def __init__(self, verbose=False):
@@ -298,12 +370,39 @@ class HumanOut:
 		print()
 
 	def add_ff(self, result):
-		"""Print FF analysis result."""
-		pct = result["ratio"] * 100
-		print(f"{result['design']}: {result['ff']}/{result['total']} FF "
-			  f"({pct:.1f}%), area: {result['abc_area']} logic + "
-			  f"{result['ff_area']} FF = {result['total_area']} "
-			  f"({result['ff_area_pct']:.1f}% FF)")
+		"""Print cell classification result."""
+		total = result["total"]
+		seq = result["seq"]
+		comb = result["comb"]
+		other = result["other"]
+
+		print(f"{result['design']}: {total} cells")
+		if total > 0:
+			print(f"  seq:   {seq:6d}  ({seq/total*100:5.1f}%)")
+			print(f"  comb:  {comb:6d}  ({comb/total*100:5.1f}%)")
+			if other > 0:
+				print(f"  other: {other:6d}  ({other/total*100:5.1f}%)")
+
+		abc_area = result.get("abc_area", 0)
+		ff_area = result.get("ff_area", 0)
+		total_area = result.get("total_area", 0)
+		ff_area_pct = result.get("ff_area_pct", 0)
+
+		if total_area > 0:
+			print(f"  area: {abc_area} logic + {ff_area} FF = "
+				  f"{total_area} ({ff_area_pct:.1f}% FF)")
+
+		if self._verbose:
+			for cat in ("seq", "comb", "other"):
+				by_type = result.get(f"{cat}_types", {})
+				if by_type:
+					print(f"  {cat} details:")
+					sorted_types = sorted(
+						by_type.items(), key=lambda x: -x[1]
+					)
+					for t, c in sorted_types:
+						print(f"    {c:6d}  {t}")
+		print()
 
 	def out(self):
 		pass
@@ -326,7 +425,7 @@ class CsvOut:
 		self._memory[yosys_bin, tag] = float(mem)
 
 	def add_stats(self, stats, yosys_bins):
-		"""Collect stats for CSV output (analyze mode)."""
+		"""Collect stats for CSV output."""
 		design = stats.get("design", "unknown")
 		yosys = stats.get("yosys", "yosys")
 		t = stats.get("time")
@@ -341,7 +440,6 @@ class CsvOut:
 
 	def add_ff(self, result):
 		"""Collect FF result for CSV output."""
-		# FF results printed immediately in out()
 		pass
 
 	def out(self):
@@ -357,28 +455,28 @@ class CsvOut:
 		ys_root = common_parent([Path(str(y)) for y in yosyes])
 
 		def header(yosyes):
-			print("design", end="\t")
+			print("design", end=";")
 			for ys in yosyes:
-				print(Path(str(ys)).relative_to(ys_root), end="\t")
+				print(Path(str(ys)).relative_to(ys_root), end=";")
 			print()
 
 		print("time")
 		header(yosyes)
 		for design in designs:
-			print(design, end="\t")
+			print(design, end=";")
 			for ys in yosyes:
 				t = self._time.get((ys, design))
-				print(f"{t:.2f}" if t else "", end="\t")
+				print(f"{t:.2f}" if t else "", end=";")
 			print()
 
 		print()
 		print("memory")
 		header(yosyes)
 		for design in designs:
-			print(design, end="\t")
+			print(design, end=";")
 			for ys in yosyes:
 				m = self._memory.get((ys, design))
-				print(f"{m:.1f}" if m else "", end="\t")
+				print(f"{m:.1f}" if m else "", end=";")
 			print()
 
 		if self._cells:
@@ -386,16 +484,16 @@ class CsvOut:
 			print("cells")
 			header(yosyes)
 			for design in designs:
-				print(design, end="\t")
+				print(design, end=";")
 				for ys in yosyes:
 					c = self._cells.get((ys, design))
-					print(f"{c}" if c else "", end="\t")
+					print(f"{c}" if c else "", end=";")
 				print()
 
 yosys_log_end = re.compile("End of script.*")
 
 def run_mode_basic(out, mode, design, synth_mode, yosys, params):
-	"""Run artifact/verilog/synth mode (original thing.py behavior)."""
+	"""Run artifact/verilog/synth mode"""
 	design_name, design_class = design
 	tag = tag_for(design_name, params)
 	ap = artifact_path_for(tag)
@@ -423,7 +521,6 @@ def run_mode_basic(out, mode, design, synth_mode, yosys, params):
 def run_mode_analyze(yosys_bin, tag, flow, detailed_timing=False):
 	"""
 	Run analyze mode: synthesize from artifact and collect detailed stats.
-	Uses -d flag for per-pass CPU timing (getrusage-based).
 	"""
 	ap = artifact_path_for(tag)
 	if not ap.exists():
@@ -447,12 +544,7 @@ def run_mode_analyze(yosys_bin, tag, flow, detailed_timing=False):
 
 	return stats
 
-def run_mode_ff(yosys_bin, tag, flow, ff_size=6):
-	"""
-	Run FF analysis mode: count FFs using Yosys select with wildcard
-	patterns (no hardcoded cell type list). Computes FF/total ratio
-	and area estimates.
-	"""
+def run_mode_ff(yosys_bin, tag, flow, cell_cats, ff_size=6):
 	ap = artifact_path_for(tag)
 	if not ap.exists():
 		print(f"Artifact not found: {ap}", file=sys.stderr)
@@ -463,44 +555,45 @@ def run_mode_ff(yosys_bin, tag, flow, ff_size=6):
 	script = (
 		f"read_rtlil {ap}\n"
 		f"{synth_cmd}\n"
-		f"select -count {FF_SELECT_EXPR}\n"
-		f"select -count *\n"
 		f"stat\n"
 		f"abc -script +strash;print_stats\n"
 	)
 
 	output = run_yosys(yosys_bin, script)
-	counts = parse_select_count(output)
-	ff_count = int(counts[0]) if len(counts) >= 1 else 0
-	total_from_select = int(counts[1]) if len(counts) >= 2 else 0
+	stats = parse_stat(output)
+	cells_breakdown = stats.get("cells_breakdown", {})
 
-	m = re.search(r'^\s*(\d+)\s+cells\s*$', output, re.MULTILINE)
-	total_cells = int(m.group(1)) if m else total_from_select
+	totals, by_type = classify_cells(cells_breakdown, cell_cats)
+
+	total_cells = sum(totals.values())
+	seq_count = totals["seq"]
 
 	abc_area = parse_abc_area(output)
-	logic = total_cells - ff_count
-	ratio = ff_count / total_cells if total_cells > 0 else 0.0
-	ff_area = ff_count * ff_size
+	ff_area = seq_count * ff_size
 	total_area = abc_area + ff_area
 	ff_area_pct = (ff_area / total_area * 100) if total_area > 0 else 0.0
 
 	return {
 		"design": tag,
-		"ff": ff_count,
-		"logic": logic,
+		"seq": seq_count,
+		"mem": totals["mem"],
+		"comb": totals["comb"],
+		"other": totals["other"],
 		"total": total_cells,
-		"ratio": ratio,
+		"ratio": seq_count / total_cells if total_cells > 0 else 0.0,
 		"abc_area": abc_area,
 		"ff_area": ff_area,
 		"total_area": total_area,
 		"ff_area_pct": ff_area_pct,
+		"seq_types": by_type["seq"],
+		"mem_types": by_type["mem"],
+		"other_types": by_type["other"],
+		"comb_types": by_type["comb"],
 	}
 
 def resolve_designs(args, mode):
 	"""
 	Resolve the list of (design_name, params) to run.
-	For artifact/verilog/synth modes, designs come from --design or --auto.
-	For analyze/ff modes, designs come from --design or artifacts/ discovery.
 	"""
 	params = params_from_str(args.param)
 
@@ -517,7 +610,6 @@ def resolve_designs(args, mode):
 			print("Missing --design without --auto", file=sys.stderr)
 			sys.exit(1)
 	else:
-		# analyze / ff: can discover from artifacts/
 		if args.design:
 			return [(args.design, params)]
 		else:
@@ -526,7 +618,6 @@ def resolve_designs(args, mode):
 				print("No designs found in artifacts/", file=sys.stderr)
 				sys.exit(1)
 			return [(d, {}) for d in discovered]
-
 
 def single_run(out, mode, args, design_name, params):
 	"""Execute a single design in artifact/verilog/synth mode."""
@@ -615,6 +706,7 @@ def main():
 
 	if mode in (RunMode.ARTIFACT, RunMode.VERILOG, RunMode.SYNTH):
 		if mode == RunMode.ARTIFACT:
+			Path("canon").mkdir(parents=True, exist_ok=True)
 			with open(Path("canon") / "ys-version", 'w') as f:
 				arg = "--git-hash"
 				try:
@@ -659,6 +751,12 @@ def main():
 		return
 
 	if mode == RunMode.FF:
+		cell_cats = dump_cell_groups(args.yosys[0])
+
+		if not cell_cats:
+			print("Warning: Cell classification failed. All cells will be 'other'.",
+				  file=sys.stderr)
+
 		design_list = resolve_designs(args, mode)
 		results = []
 
@@ -666,6 +764,7 @@ def main():
 			tag = tag_for(design_name, params)
 			result = run_mode_ff(
 				args.yosys[0], tag, args.flow,
+				cell_cats=cell_cats,
 				ff_size=args.ff_size,
 			)
 			if result:
@@ -676,13 +775,13 @@ def main():
 			sys.exit(1)
 
 		if out_mode == OutputMode.CSV:
-			print("design,ff,logic,total,ff_ratio,"
-				  "abc_area,ff_area,total_area,ff_area_pct")
+			print("design;seq;comb;other;total;ff_ratio;"
+				  "abc_area;ff_area;total_area;ff_area_pct")
 			for res in results:
-				print(f"{res['design']},{res['ff']},{res['logic']},"
-					  f"{res['total']},{res['ratio']:.4f},"
-					  f"{res['abc_area']},{res['ff_area']},"
-					  f"{res['total_area']},{res['ff_area_pct']:.2f}")
+				print(f"{res['design']};{res['seq']};{res['comb']};"
+					  f"{res['other']};{res['total']};{res['ratio']:.4f};"
+					  f"{res['abc_area']};{res['ff_area']};"
+					  f"{res['total_area']};{res['ff_area_pct']:.2f}")
 		else:
 			print(f"(ff_size={args.ff_size})")
 			for res in results:
