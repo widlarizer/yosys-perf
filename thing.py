@@ -23,12 +23,14 @@ class OutputMode(StrEnum):
     HUMAN = "human"
     CSV = "csv"
 
+
 class RunMode(StrEnum):
     ARTIFACT = "artifact"
     VERILOG = "verilog"
     SYNTH = "synth"
     ANALYZE = "analyze"
     FF = "ff"
+
 
 class SynthMode(StrEnum):
     SYNTH = "synth"
@@ -44,6 +46,7 @@ class SynthMode(StrEnum):
             print(f"Invalid synthesis flow: {s}", file=sys.stderr)
             sys.exit(1)
 
+
 def common_parent(paths):
     if not paths:
         return Path(".")
@@ -54,6 +57,7 @@ def common_parent(paths):
             break
         common_parts.append(parts[0])
     return Path(*common_parts) if common_parts else Path(".")
+
 
 def fmt_params(params):
     if not params:
@@ -66,6 +70,7 @@ def fmt_params(params):
         s += f"{key}_{value}"
         first = False
     return s
+
 
 def design_map():
     """Get available designs from scripts module."""
@@ -80,6 +85,7 @@ def design_map():
                     d[c.__name__.lower()] = c
     return d
 
+
 def discover_designs(artifacts_dir):
     """Discover designs from .il files in artifacts directory."""
     designs = []
@@ -88,6 +94,7 @@ def discover_designs(artifacts_dir):
         for f in sorted(p.glob("*.il")):
             designs.append(f.stem)
     return designs
+
 
 def params_from_str(pairs):
     ret = {}
@@ -100,16 +107,20 @@ def params_from_str(pairs):
         ret[lhs] = rhs
     return ret
 
+
 def tag_for(design, params):
     return f"{design}_{fmt_params(params)}" if params else design
 
+
 def artifact_path_for(tag):
     return Path("artifacts") / f"{tag}.il"
+
 
 # Sequential logic group
 SEQ_GROUPS = {"reg", "reg_ff", "reg_latch"}
 # Memory groups
 MEM_GROUPS = {"mem"}
+
 
 def load_cell_groups(json_path):
     """
@@ -134,6 +145,7 @@ def load_cell_groups(json_path):
             cats[t] = cat
 
     return cats
+
 
 def dump_cell_groups(yosys_bin):
     """
@@ -165,6 +177,7 @@ def dump_cell_groups(yosys_bin):
             except OSError:
                 pass
 
+
 def classify_cells(cells_breakdown, cell_cats):
     """
     Given a dict of {cell_type: count} from stat output and a
@@ -186,6 +199,7 @@ def classify_cells(cells_breakdown, cell_cats):
 
     return totals, by_type
 
+
 def run_yosys(yosys_bin, script, detailed_timing=False):
     """Run Yosys with the given script, return combined stdout+stderr."""
     cmd = [str(yosys_bin)]
@@ -194,6 +208,7 @@ def run_yosys(yosys_bin, script, detailed_timing=False):
     cmd.extend(["-p", script])
     result = subprocess.run(cmd, capture_output=True, text=True)
     return result.stdout + result.stderr
+
 
 def parse_stat(output):
     """Parse `stat` output for cell counts, memory, timing footer."""
@@ -279,6 +294,7 @@ def parse_stat(output):
 
     return stats
 
+
 def parse_detailed_timing(output):
     """
     Parse Yosys -d output.
@@ -295,6 +311,7 @@ def parse_detailed_timing(output):
         pass_times.append((name, secs, count))
 
     return sorted(pass_times, key=lambda x: -x[1])
+
 
 def format_pass_timing(pass_times, top_n=10):
     """Format pass timing for display."""
@@ -318,6 +335,7 @@ def format_pass_timing(pass_times, top_n=10):
 
     return '\n'.join(lines)
 
+
 def parse_abc_area(output):
     """Parse ABC 'and = N' from print_stats output."""
     abc_area = 0
@@ -325,13 +343,16 @@ def parse_abc_area(output):
         abc_area += int(m.group(1))
     return abc_area
 
+
 class HumanOut:
     def __init__(self, verbose=False):
         self._verbose = verbose
 
+
     def add(self, yosys_bin, tag, result):
         print(f"{yosys_bin}: {tag}")
         print(result)
+
 
     def add_stats(self, stats, yosys_bins):
         """Print detailed stats (analyze mode)."""
@@ -369,6 +390,7 @@ class HumanOut:
 
         print()
 
+
     def add_ff(self, result):
         """Print cell classification result."""
         total = result["total"]
@@ -404,14 +426,17 @@ class HumanOut:
                         print(f"    {c:6d}  {t}")
         print()
 
+
     def out(self):
         pass
+
 
 class CsvOut:
     def __init__(self):
         self._time = {}
         self._memory = {}
         self._cells = {}
+
 
     def add(self, yosys_bin, tag, result):
         match = re.search(
@@ -423,6 +448,7 @@ class CsvOut:
         user, system, mem = match.groups()
         self._time[yosys_bin, tag] = float(user) + float(system)
         self._memory[yosys_bin, tag] = float(mem)
+
 
     def add_stats(self, stats, yosys_bins):
         """Collect stats for CSV output."""
@@ -438,9 +464,11 @@ class CsvOut:
         if cells is not None:
             self._cells[Path(yosys), design] = cells
 
+
     def add_ff(self, result):
         """Collect FF result for CSV output."""
         pass
+
 
     def out(self):
         if not self._time and not self._memory:
@@ -490,7 +518,9 @@ class CsvOut:
                     print(f"{c}" if c else "", end=";")
                 print()
 
+
 yosys_log_end = re.compile("End of script.*")
+
 
 def run_mode_basic(out, mode, design, synth_mode, yosys, params):
     """Run artifact/verilog/synth mode"""
@@ -518,6 +548,7 @@ def run_mode_basic(out, mode, design, synth_mode, yosys, params):
         res = "(no end-of-script marker found)"
     out.add(yosys, f"{tag}-{synth_mode.name}", res)
 
+
 def run_mode_analyze(yosys_bin, tag, flow, detailed_timing=False):
     """
     Run analyze mode: synthesize from artifact and collect detailed stats.
@@ -543,6 +574,7 @@ def run_mode_analyze(yosys_bin, tag, flow, detailed_timing=False):
         stats["pass_timing"] = parse_detailed_timing(output)
 
     return stats
+
 
 def run_mode_ff(yosys_bin, tag, flow, cell_cats, ff_size=6):
     ap = artifact_path_for(tag)
@@ -591,6 +623,7 @@ def run_mode_ff(yosys_bin, tag, flow, cell_cats, ff_size=6):
         "comb_types": by_type["comb"],
     }
 
+
 def resolve_designs(args, mode):
     """
     Resolve the list of (design_name, params) to run.
@@ -619,6 +652,7 @@ def resolve_designs(args, mode):
                 sys.exit(1)
             return [(d, {}) for d in discovered]
 
+
 def single_run(out, mode, args, design_name, params):
     """Execute a single design in artifact/verilog/synth mode."""
     designs = design_map()
@@ -639,6 +673,7 @@ def single_run(out, mode, args, design_name, params):
             yosys,
             params,
         )
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -786,6 +821,7 @@ def main():
             print(f"(ff_size={args.ff_size})")
             for res in results:
                 out.add_ff(res)
+
 
 if __name__ == "__main__":
     main()
