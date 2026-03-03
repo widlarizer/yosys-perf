@@ -180,11 +180,18 @@ def parse_stat(output):
                 cells[m.group(1)] = int(m.group(2))
         stats["cells_breakdown"] = cells
 
+    # TODO parse wall time when available (yosys#5708)
+    m = re.search(r'Wall:\s*([\d.]+)s', output)
+    if m:
+        stats["wall_time"] = float(m.group(1))
+        stats["time"] = stats["wall_time"]
+
     m = re.search(r'CPU:\s*user\s+([\d.]+)s\s+system\s+([\d.]+)s.*?MEM:\s*([\d.]+)\s*MB', output)
     if m:
         stats["user_time"] = float(m.group(1))
         stats["sys_time"] = float(m.group(2))
-        stats["time"] = stats["user_time"] + stats["sys_time"]
+        if "time" not in stats:
+            stats["time"] = stats["user_time"] + stats["sys_time"]
         stats["mem_mb"] = float(m.group(3))
 
     m = re.search(r'Time spent:\s*(.+?)(?:\n|$)', output)
@@ -237,7 +244,11 @@ class HumanOut:
         prefix = f"{yosys}: {design}" if len(yosys_bins) > 1 else design
 
         if (u := stats.get("user_time")) is not None:
-            print(f"{prefix}: user {u:.2f}s system {stats['sys_time']:.2f}s, MEM: {stats['mem_mb']:.2f} MB")
+            cpu = f"user {u:.2f}s system {stats['sys_time']:.2f}s"
+            if (w := stats.get("wall_time")) is not None:
+                print(f"{prefix}: wall {w:.2f}s ({cpu}), MEM: {stats['mem_mb']:.2f} MB")
+            else:
+                print(f"{prefix}: CPU {cpu}, MEM: {stats['mem_mb']:.2f} MB")
         else:
             print(f"{prefix}:")
 
@@ -434,4 +445,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
