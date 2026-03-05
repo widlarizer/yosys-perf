@@ -2,6 +2,16 @@
 
 Runtime and memory usage test collection for [Yosys](https://github.com/YosysHQ/yosys). Very early stage repo. Might change a lot soon.
 
+## Quick start
+
+```bash
+# Run synthesis benchmarks on all designs
+python thing.py
+
+# Compare two Yosys builds
+python thing.py --yosys ./yosys-old ./yosys-new --csv
+```
+
 ## Directory structure
 
 + thing.py
