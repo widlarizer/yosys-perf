@@ -228,20 +228,28 @@ def parse_stat(output):
     else:
         stats = _parse_stat_old(output)
 
-    # TODO parse wall time when available (yosys#5708)
     m = re.search(r'Wall:\s*([\d.]+)s', output)
     if m:
         stats["wall_time"] = float(m.group(1))
         stats["time"] = stats["wall_time"]
 
-    # "CPU: user 3.30s system 0.15s, MEM: 58.18 MB peak"
-    m = re.search(r'CPU:\s*user\s+([\d.]+)s\s+system\s+([\d.]+)s.*?MEM:\s*([\d.]+)\s*MB', output)
+    # "CPU: user 3.30s system 0.15s, Wall: 65.43s, MEM: 58.18 MB peak"
+    m = re.search(r'CPU:\s*user\s+([\d.]+)s\s+system\s+([\d.]+)s,\s*Wall:\s*([\d.]+)s.*?MEM:\s*([\d.]+)\s*MB', output)
     if m:
         stats["user_time"] = float(m.group(1))
         stats["sys_time"] = float(m.group(2))
-        if "time" not in stats:
-            stats["time"] = stats["user_time"] + stats["sys_time"]
-        stats["mem_mb"] = float(m.group(3))
+        stats["wall_time"] = float(m.group(3))
+        stats["time"] = stats["wall_time"]
+        stats["mem_mb"] = float(m.group(4))
+    else:
+        # fallback for builds without wall time
+        m = re.search(r'CPU:\s*user\s+([\d.]+)s\s+system\s+([\d.]+)s.*?MEM:\s*([\d.]+)\s*MB', output)
+        if m:
+            stats["user_time"] = float(m.group(1))
+            stats["sys_time"] = float(m.group(2))
+            if "time" not in stats:
+                stats["time"] = stats["user_time"] + stats["sys_time"]
+            stats["mem_mb"] = float(m.group(3))
 
     # "Time spent: 43% 2x abc (2 sec), 13% 43x opt_dff (0 sec), ..."
     m = re.search(r'Time spent:\s*(.+?)(?:\n|$)', output)
